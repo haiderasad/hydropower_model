@@ -1,0 +1,1062 @@
+Public Function JKJInterpolate(x As Double, Xr As Range, Yr As Range, Sort As Integer) As Double
+
+    Dim m As Double
+    Dim x1, y1, x2, y2 As Double
+    Dim y As Double
+    
+    m = Application.Match(x, Xr, Sort)
+    x1 = Application.Index(Xr, m)
+    y1 = Application.Index(Yr, m)
+    x2 = Application.Index(Xr, m + 1)
+    y2 = Application.Index(Yr, m + 1)
+    
+    y = y1 + (x - x1) * (y2 - y1) / (x2 - x1)
+    JKJInterpolate = y
+    
+End Function
+
+Public Function JKJ_Colebrook(Flow_Q, Pipe_diameter, Roughness_mm) As Double
+
+'units
+'Flow_Q is m³/s
+'Pipe_diameter is m
+'kinematic_visc is m²/s
+'Relative_roughness is mm
+
+Dim l_a, l_b, reynolds, velocity As Double
+Roughness_m = Roughness_mm / 1000
+Kinematic_visc = 0.00000108 'water at 20 deg C
+velocity = Flow_Q / ((Pipe_diameter ^ 2) / 4 * 3.1416)
+reynolds = velocity * Pipe_diameter / Kinematic_visc
+
+l_a = 0.000001 ' initial guess
+  
+If (reynolds = 0) Then
+   l_a = 0
+Else
+If (reynolds < 2300) Then
+    l_a = 64 / reynolds
+Else
+10   l_b = l_a
+     l_a = 1 / (2 * Log(2.51 / reynolds / Sqr(l_b) + Roughness_m / Pipe_diameter / 3.71) / Log(10#)) ^ 2
+     If (Abs(l_a - l_b) > 0.0000000001) Then GoTo 10
+
+End If
+End If
+
+JKJ_Colebrook = l_a
+
+End Function
+
+
+
+
+
+'Option Explicit
+Dim rte, head_loss_gen_ini, head_loss_pump_ini, hours_gen, g, eff_t, eff_p As Double
+Dim use_excav, use_power_solve, use_head_range, ur_count, lr_count, SortType As Integer
+
+' ' Initialize arrays
+Dim ur_y_i, ur_vol_i, lr_y_i, lr_vol_i, WL_i, inputs_i As Range
+Dim ur_y, ur_vol, lr_y, lr_vol, WL, inputs As Variant
+
+Dim u_fsl, u_mol, l_fsl, l_mol, u_fsl_vol, u_mol_vol, l_fsl_vol, l_mol_vol, u_live_vol, l_live_vol, u_live_vol_excav, l_live_vol_excav, k_gen, k_pump, live_vol_power As Double
+Dim WL_Vol_table, Head_table, Volume_table, Power_table As Variant
+Dim turbine_rating_point, case_id_solve, case_id_res As String
+
+Dim Hg_rated, Hg_max, Hg_min, Hg_average, Hl_gen_rated, Hl_pump_rated, Htu_rated, Hpu_rated, Q_gen_rated, Power_calc_MW, Q_pump_rated, head_loss_trial As Double
+
+Sub trial_res_volumes()
+
+'Dim volumes_simple_calc, volumes_power_calc, volumes_head_range_calc As Variant
+Dim delta_Q As Variant
+
+'user inputs***********
+'default values
+rte = 0.75 'round trip efficiency
+
+head_loss_gen_ini = 0.05 'head loss (initial assumption in generation mode)
+head_loss_pump_ini = head_loss_gen_ini * rte  'head loss (initial assumption in pumping mode)
+
+hours_gen = 8 ' initial gen cycle time
+g = 9.81 'gravity
+eff_t = 0.9 'turbine mode efficency
+eff_p = 0.91 ' pump mode efficency
+SortType = -1
+'************************
+
+    
+' Define the input ranges
+Set ur_y_i = Range("URy")
+Set ur_vol_i = Range("URVOL")
+Set lr_y_i = Range("LRy")
+Set lr_vol_i = Range("LRvol")
+Set WL_i = Range("i_WL")
+Set inputs_i = Range("i_inputs")
+
+
+' this fucntion is just to rebase the arrays to base 0. The default range from excel starts at base 1 as default.
+ur_y = GetInputArrays(ur_y_i)
+ur_vol = GetInputArrays(ur_vol_i)
+lr_y = GetInputArrays(lr_y_i)
+lr_vol = GetInputArrays(lr_vol_i)
+WL = GetInputArrays(WL_i)
+inputs = GetInputArrays(inputs_i)
+
+'calculate volumes based on the input scenarios (ie solve for independent reserovir, balancing reservoir, for power and for head).
+'WL_Vol_table = volumes_r1(WL, inputs, ur_y, ur_vol, lr_y, lr_vol)
+
+
+use_excav = inputs(1, 0)
+use_head_range = inputs(2, 0)
+use_power_solve = inputs(3, 0)
+
+case_id_solve = use_power_solve & "_" & use_head_range
+
+    Select Case case_id_solve
+        Case "0_0":
+        
+            u_fsl_fix = inputs(5, 0)
+            u_mol_fix = inputs(6, 0)
+            l_fsl_fix = inputs(7, 0)
+            l_mol_fix = inputs(8, 0)
+            ur_count = u_fsl_fix + u_mol_fix
+            lr_count = l_fsl_fix + l_mol_fix
+            
+                If ur_count = 1 And lr_count = 1 Then   ' there are not enough parameters to solve for, so give error message and exit.
+                    MsgBox ("need more values!!!!!")
+                    Exit Sub
+                Else
+                    WL_Vol_table = volumes_simple_calc(WL, inputs, ur_y, ur_vol, lr_y, lr_vol)
+                End If
+            
+        Case "1_0": 'solving for power only.
+            
+            WL_Vol_table = volumes_power_calc(WL, inputs, ur_y, ur_vol, lr_y, lr_vol)
+        
+
+        Case "0_1": 'solving for head range only.
+            WL_Vol_table = volumes_head_range_calc(WL, inputs, ur_y, ur_vol, lr_y, lr_vol)
+    End Select
+
+
+u_fsl = WL_Vol_table(0, 0)
+u_mol = WL_Vol_table(1, 0)
+l_fsl = WL_Vol_table(0, 1)
+l_mol = WL_Vol_table(1, 1)
+u_live_vol = WL_Vol_table(5, 0)
+l_live_vol = WL_Vol_table(5, 1)
+u_live_vol_excav = WL_Vol_table(6, 0)
+l_live_vol_excav = WL_Vol_table(6, 1)
+
+use_excav = inputs(1, 0)
+If use_excav = 1 Then
+live_vol_power = WorksheetFunction.Min(u_live_vol_excav, l_live_vol_excav)
+Else
+live_vol_power = WorksheetFunction.Min(u_live_vol, l_live_vol)
+End If
+
+turbine_rating_point = inputs_i(1, 1)
+
+'calculate the rated gross head values
+Hg_max = u_fsl - l_mol
+Hg_min = u_mol - l_fsl
+Hg_average = (Hg_max + Hg_min) / 2
+
+    If turbine_rating_point = "Average head" Then
+    Hg_rated = Hg_average
+    ElseIf turbine_rating_point = "Minimum head" Then
+    Hg_rated = Hg_min
+    End If
+
+'calculate rated head loss and net head
+Hl_gen_rated = Hg_rated * head_loss_gen_ini
+Q_gen_rated = live_vol_power / (3600 * hours_gen)
+k_gen = Hl_gen_rated / Q_gen_rated ^ 2
+
+Htu_rated = Hg_rated - Hl_gen_rated
+Power_calc_MW = Q_gen_rated * Htu_rated * g * eff_t / 1000
+
+Q_pump_rated = Q_gen_rated * rte
+Hl_pump_rated = k_gen * Q_pump_rated ^ 2
+Hpu_rated = Hg_rated + Hl_pump_rated
+'Q_pump_rated = Power_calc_MW * 1000 / (Hpu_rated * g / eff_p)
+
+'calculate rated generation and pumping flow rate, and power
+
+'Dim Head_table As Variant
+
+Head_table = non_rated_values(Power_calc_MW, k_gen, Hg_max, Hg_min, Hg_average, turbine_rating_point)
+
+Head_table(2, 0) = Hg_rated
+Head_table(3, 0) = Q_gen_rated
+Head_table(4, 0) = Q_pump_rated
+Head_table(5, 0) = Hl_gen_rated
+Head_table(6, 0) = Hl_pump_rated
+Head_table(7, 0) = Htu_rated
+Head_table(8, 0) = Hpu_rated
+
+'Fixed speed checks
+Dim Hg_ratio, Hpu_Htu_ratio, Hpu_Htu_limit, Hg_ratio_limit As Double
+Dim Htu_max, Htu_min, Hpu_max As Double
+Dim Hg_ratio_flag, Hpu_Htu_flag As Integer
+
+
+Htu_max = Head_table(7, 1)
+Htu_min = Head_table(7, 2)
+Hpu_max = Head_table(8, 1)
+
+Hg_ratio = Hg_max / Hg_min
+Hpu_Htu_ratio = Hpu_max / Htu_min
+Hpu_Htu_limit = 0.0000005 * Htu_max ^ 2 - 0.001 * Htu_max + 1.6284
+Hg_ratio_limit = Hpu_Htu_limit * 0.9
+
+    If Hg_ratio < Hg_ratio_limit Then
+    Hg_ratio_flag = 1
+    Else
+        If Hpu_Htu_ratio < Hpu_Htu_limit Then
+        Hpu_Htu_flag = 1
+        Else
+        Hpu_Htu_flag = 0
+        End If
+    Hg_ratio_flag = 0
+    End If
+
+ReDim Power_table(7, 0)
+
+Power_table(0, 0) = Power_calc_MW
+Power_table(1, 0) = live_vol_power
+Power_table(2, 0) = Hg_ratio
+Power_table(3, 0) = Hg_ratio_limit
+Power_table(4, 0) = Hg_ratio_flag
+Power_table(5, 0) = Hpu_Htu_ratio
+Power_table(6, 0) = Hpu_Htu_limit
+Power_table(7, 0) = Hg_ratio_flag
+
+
+Range("Head_table") = Head_table
+Range("i_WL_VOL_result") = WL_Vol_table
+Range("power_table") = Power_table
+
+Call Copy_wl
+
+End Sub
+  
+Function GetInputArrays(array_range As Variant) As Variant
+    ' Declare variables for dimensions
+    Dim numRows As Long
+    Dim numCols As Long
+    Dim i, j As Integer
+    
+    ' Get dimensions for array_range
+    numRows = array_range.Rows.Count
+    numCols = array_range.Columns.Count
+    
+    ' Declare the result array
+    Dim result() As Variant
+'
+    ' Resize the destination array to be 0-based
+    ReDim result(0 To numRows - 1, 0 To numCols - 1)
+
+    ' Transfer the values from the range to the array
+    For i = 1 To numRows
+        For j = 1 To numCols
+            result(i - 1, j - 1) = array_range.Cells(i, j).value
+        Next j
+    Next i
+
+    ' Return the result array
+    GetInputArrays = result
+    
+End Function
+
+Public Function JKJInterpolate_r1(x, Xr, Yr, SortType) As Double
+
+    Dim n As Double
+    Dim x1, y1, x2, y2 As Double
+    Dim y As Double
+
+    
+    n = Application.Match(x, Xr, SortType) - 1
+    If Not IsError(n) Then
+        x1 = Xr(n, 0)
+        y1 = Yr(n, 0)
+        
+        If n < UBound(Xr) Then
+            x2 = Xr(n + 1, 0)
+            y2 = Yr(n + 1, 0)
+        Else
+            x2 = x1
+            y2 = y1
+        End If
+        
+        y = y1 + (x - x1) * (y2 - y1) / (x2 - x1)
+        JKJInterpolate_r1 = y
+    Else
+        JKJInterpolate_r1 = CVErr(xlErrNA) 'return #N/A if match is not found
+    End If
+
+End Function
+
+
+
+Sub Copy_wl()
+
+    Range("wl_copy").Select
+    Selection.copy
+    Range("i_WL").Select
+    Selection.PasteSpecial Paste:=xlPasteValues, Operation:=xlNone, SkipBlanks _
+        :=False, Transpose:=False
+End Sub
+
+
+
+Function volumes_simple_calc(WL As Variant, inputs As Variant, ur_y As Variant, ur_vol As Variant, lr_y As Variant, lr_vol As Variant)
+' these are simple to calculate becuase the user has completely defined a single reserovir or more.
+'The levels and volumes can simply be interpolated.
+Dim WL_updated As Variant
+ReDim WL_updated(6, 1)
+SortType = -1
+
+
+u_fsl = WL(0, 0)
+u_mol = WL(1, 0)
+l_fsl = WL(0, 1)
+l_mol = WL(1, 1)
+
+u_fsl_fix = inputs(5, 0)
+u_mol_fix = inputs(6, 0)
+l_fsl_fix = inputs(7, 0)
+l_mol_fix = inputs(8, 0)
+
+ur_count = u_fsl_fix + u_mol_fix
+lr_count = l_fsl_fix + l_mol_fix
+case_id_solve = use_power_solve & "_" & use_head_range
+case_id_res = ur_count & "_" & lr_count
+
+
+use_excav = inputs(1, 0)
+If use_excav = 1 Then
+u_excav = WL(2, 0)
+l_excav = WL(2, 1)
+Else
+u_excav = 0
+l_excav = 0
+End If
+
+    Select Case case_id_res
+
+        Case "2_2":
+            marker = "i 0_0, WL 2_2: case where both res given"
+            
+            'this is the situation when the user inputs 2 water levels (most simple case)
+            'model will select the minimum live volume as the governing condition for power calcs, etc
+            u_fsl = WL(0, 0)
+            u_mol = WL(1, 0)
+            l_fsl = WL(0, 1)
+            l_mol = WL(1, 1)
+            u_fsl_vol = JKJInterpolate_r1(u_fsl, ur_y, ur_vol, SortType)
+            u_mol_vol = JKJInterpolate_r1(u_mol, ur_y, ur_vol, SortType)
+            l_fsl_vol = JKJInterpolate_r1(l_fsl, lr_y, lr_vol, SortType)
+            l_mol_vol = JKJInterpolate_r1(l_mol, lr_y, lr_vol, SortType)
+
+
+        Case "2_1":     'upper reservoir is governing so the lower is matched to the upper volume
+            
+            marker = "i 0_0, WL 2_1: case 2, UR res governing, set LR levels to match Live Volume"
+            u_fsl = WL(0, 0)
+            u_mol = WL(1, 0)
+            u_fsl_vol = JKJInterpolate_r1(u_fsl, ur_y, ur_vol, SortType)
+            u_mol_vol = JKJInterpolate_r1(u_mol, ur_y, ur_vol, SortType)
+            live_volume_UR = u_fsl_vol - u_mol_vol + u_excav
+            
+            'set lower reserovir levels based live_volume from UR
+            If l_fsl_fix = 1 Then
+                l_fsl = WL(0, 1)
+                l_fsl_vol = JKJInterpolate_r1(l_fsl, lr_y, lr_vol, SortType)
+                l_fsl_vol_excav = l_fsl_vol + l_excav
+                l_mol_vol = l_fsl_vol_excav - live_volume_UR
+                l_mol = JKJInterpolate_r1(l_mol_vol, lr_vol, lr_y, SortType)
+            ElseIf l_mol_fix = 1 Then
+                l_mol = WL(1, 1)
+                l_mol_vol = JKJInterpolate_r1(l_mol, lr_y, lr_vol, SortType)
+                l_fsl_vol = l_mol_vol + live_volume_UR
+                l_fsl_vol_excav = l_fsl_vol + l_excav
+                l_fsl = JKJInterpolate_r1(l_fsl_vol, lr_vol, lr_y, SortType)
+            End If
+
+        Case "1_2": 'lower reservoir is governing so the upper is matched to the lower volume
+        
+            marker = "i 0_0, WL 1_2: case 3, LR res governing, set UR levels to match Live Volume"
+            l_fsl = WL(0, 1)
+            l_mol = WL(1, 1)
+            l_fsl_vol = JKJInterpolate_r1(l_fsl, lr_y, lr_vol, SortType)
+            l_mol_vol = JKJInterpolate_r1(l_mol, lr_y, lr_vol, SortType)
+            live_volume_LR = l_fsl_vol - l_mol_vol + u_excav
+            
+            'set upper reserovir levels on live_volume LR
+            
+            If u_fsl_fix = 1 Then
+                u_fsl = WL(0, 0)
+                u_fsl_vol = JKJInterpolate_r1(u_fsl, ur_y, ur_vol, SortType)
+                u_fsl_vol_excav = u_fsl_vol + u_excav
+                u_mol_vol = u_fsl_vol_excav - live_volume_LR
+                u_mol = JKJInterpolate_r1(u_mol_vol, ur_vol, ur_y, SortType)
+            ElseIf u_mol_fix = 1 Then
+                u_mol = WL(1, 0)
+                u_mol_vol = JKJInterpolate_r1(u_mol, ur_y, ur_vol, SortType)
+                u_fsl_vol = u_mol_vol + live_volume_LR
+                u_fsl_vol_excav = u_fsl_vol + u_excav
+                u_fsl = JKJInterpolate_r1(u_fsl_vol, ur_y, ur_vol, SortType)
+            End If
+
+
+        
+        End Select
+
+    'calculate upper and live volumes for the calcs.
+    u_live_vol = u_fsl_vol - u_mol_vol
+    l_live_vol = l_fsl_vol - l_mol_vol
+    u_live_vol_excav = u_fsl_vol - u_mol_vol + u_excav
+    l_live_vol_excav = l_fsl_vol - l_mol_vol + l_excav
+    
+    WL_updated(0, 0) = u_fsl
+    WL_updated(1, 0) = u_mol
+    WL_updated(2, 0) = u_excav
+    WL_updated(3, 0) = u_fsl_vol
+    WL_updated(4, 0) = u_mol_vol
+    WL_updated(5, 0) = u_live_vol
+    WL_updated(6, 0) = u_live_vol_excav
+            
+    WL_updated(0, 1) = l_fsl
+    WL_updated(1, 1) = l_mol
+    WL_updated(2, 1) = l_excav
+    WL_updated(3, 1) = l_fsl_vol
+    WL_updated(4, 1) = l_mol_vol
+    WL_updated(5, 1) = l_live_vol
+    WL_updated(6, 1) = l_live_vol_excav
+    
+    volumes_simple_calc = WL_updated
+    
+End Function
+
+
+
+Function volumes_power_calc(WL As Variant, inputs As Variant, ur_y As Variant, ur_vol As Variant, lr_y As Variant, lr_vol As Variant)
+Dim WL_updated As Variant
+ReDim WL_updated(6, 1)
+SortType = -1
+
+head_loss_gen_ini = 0.05
+'head_loss_pump_ini = head_loss_gen_ini * rte
+g = 9.81
+eff_t = 0.9
+eff_p = 0.91
+
+tolerance = 1
+
+turbine_rating_point = inputs(0, 0)
+
+u_fsl = WL(0, 0)
+u_mol = WL(1, 0)
+l_fsl = WL(0, 1)
+l_mol = WL(1, 1)
+
+u_fsl_fix = inputs(5, 0)
+u_mol_fix = inputs(6, 0)
+l_fsl_fix = inputs(7, 0)
+l_mol_fix = inputs(8, 0)
+
+ur_count = u_fsl_fix + u_mol_fix
+lr_count = l_fsl_fix + l_mol_fix
+case_id_solve = use_power_solve & "_" & use_head_range
+case_id_res = ur_count & "_" & lr_count
+
+' determine if the reserovirs should include excavation volume (given my user)
+use_excav = inputs(1, 0)
+
+If use_excav = 1 Then
+u_excav = WL(2, 0)
+l_excav = WL(2, 1)
+Else
+u_excav = 0
+l_excav = 0
+End If
+
+power_goal = inputs(9, 0)
+delta_vol = 9999
+Z = 0
+
+' establish turbine rating point
+    If turbine_rating_point = "Average head" Then
+    head_gross_guess = ((u_fsl - l_mol) + (u_mol - l_fsl)) / 2
+    'average head
+    Else
+    head_gross_guess = (u_mol - l_fsl)
+    'min head
+    End If
+
+    Hl_gen_rated_guess = head_gross_guess * head_loss_gen_ini
+    Htu_rated_guess = head_gross_guess - Hl_gen_rated_guess
+
+
+Do Until delta_vol < tolerance
+
+    flow_rate_guess = power_goal * 1000 / (Htu_rated_guess * g * eff_t)
+
+    live_vol_guess = flow_rate_guess * 3600 * 8 ' 8 is hours input
+
+    Select Case case_id_res
+        Case "1_1":     'one water levels provided for upper res and lower res, solve for volume and other level.
+        
+            marker = "i 1_0, WL 1_1: case 4 solve power both reservoirs"
+            
+            If u_fsl_fix = 1 Then
+            'u_fsl is fixed, so calculate the u_mol parameters
+                u_fsl = WL(0, 0)
+                u_fsl_vol = JKJInterpolate_r1(u_fsl, ur_y, ur_vol, SortType)
+                u_fsl_vol_excav = u_fsl_vol + u_excav
+                u_mol_vol = u_fsl_vol_excav - live_vol_guess
+                u_mol = JKJInterpolate_r1(u_mol_vol, ur_vol, ur_y, SortType)
+                
+            ElseIf u_mol_fix = 1 Then
+            'u_mol is fixed, so calculate the u_fsl parameters
+                u_mol = WL(1, 0)
+                u_mol_vol = JKJInterpolate_r1(u_mol, ur_y, ur_vol, SortType)
+                u_fsl_vol_excav = u_mol_vol + live_vol_guess
+                u_fsl_vol = u_fsl_vol_excav - u_excav
+                u_fsl = JKJInterpolate_r1(u_fsl_vol, ur_y, ur_vol, SortType)
+            End If
+
+            ''levels and volumes provided for lower reserovir
+            
+            If l_fsl_fix = 1 Then
+            'l_fsl is fixed, so calculate the l_mol parameters
+                l_fsl = WL(0, 1)
+                l_fsl_vol = JKJInterpolate_r1(l_fsl, lr_y, lr_vol, SortType)
+                l_fsl_vol_excav = l_fsl_vol + l_excav
+                l_mol_vol = l_fsl_vol_excav - live_vol_guess
+                l_mol = JKJInterpolate_r1(l_mol_vol, lr_vol, lr_y, SortType)
+                
+            ElseIf l_mol_fix = 1 Then
+            'l_mol is fixed, so calculate the l_fsl parameters
+                l_mol = WL(1, 0)
+                l_mol_vol = JKJInterpolate_r1(l_mol, lr_y, lr_vol, SortType)
+                l_fsl_vol_excav = l_mol_vol + live_vol_guess
+                l_fsl_vol = l_fsl_vol_excav - l_excav
+                l_fsl = JKJInterpolate_r1(l_fsl_vol, lr_vol, lr_y, SortType)
+            End If
+        
+        Case "2_1":   'two water levels provided for upper res (making it independent of the power calc). Solve for the lower res  volume and level.
+        
+            marker = "i 1_0, WL 2_1: case 5, UR res independent, set LR levels to match Live Volume guess"
+            
+            'levels and volumes for upper res
+            u_fsl = WL(0, 0)
+            u_mol = WL(1, 0)
+            u_fsl_vol = JKJInterpolate_r1(u_fsl, ur_y, ur_vol, SortType)
+            u_mol_vol = JKJInterpolate_r1(u_mol, ur_y, ur_vol, SortType)
+                
+            'set lower reservoir levels on live_volume UR
+            If l_fsl_fix = 1 Then
+                l_fsl = WL(0, 1)
+                l_fsl_vol = JKJInterpolate_r1(l_fsl, lr_y, lr_vol, SortType)
+                l_fsl_vol_excav = l_fsl_vol + l_excav
+                l_mol_vol = l_fsl_vol_excav - live_vol_guess
+                l_mol = JKJInterpolate_r1(l_mol_vol, lr_vol, lr_y, SortType)
+                
+            ElseIf l_mol_fix = 1 Then
+                l_mol = WL(1, 0)
+                l_mol_vol = JKJInterpolate_r1(l_mol, lr_y, lr_vol, SortType)
+                l_fsl_vol_excav = l_mol_vol + live_vol_guess
+                l_fsl_vol = l_fsl_vol_excav - l_excav
+                l_fsl = JKJInterpolate_r1(l_fsl_vol, lr_vol, lr_y, SortType)
+                                           
+            End If
+            
+            l_live_vol = l_fsl_vol - l_mol_vol
+            l_live_vol_excav = l_live_vol + l_excav
+
+        Case "1_2":     'two water levels provided for upper res (making it independent of the power calc). Solve for the lower res  volume and level.
+        
+            marker = "i 1_0, WL 1_2: case 6, LR res governing, set UR levels to match Live Volume"
+
+            'levels and volumes for lower res
+            l_fsl = WL(0, 1)
+            l_mol = WL(1, 1)
+            l_fsl_vol = JKJInterpolate_r1(l_fsl, lr_y, lr_vol, SortType)
+            l_mol_vol = JKJInterpolate_r1(l_mol, lr_y, lr_vol, SortType)
+
+                
+            'set lower reserovir levels on live_volume UR
+            If u_fsu_fix = 1 Then
+                u_fsl = WL(0, 1)
+                u_fsu_vol = JKJInterpolate_r1(u_fsl, ur_y, ur_vol, SortType)
+                u_fsl_vol_excav = u_fsl_vol + u_excav
+                u_mol_vol = u_fsl_vol_excav - live_vol_guess
+                u_mol = JKJInterpolate_r1(u_mol_vol, ur_vol, ur_y, SortType)
+                
+            ElseIf u_mol_fix = 1 Then
+                u_mol = WL(1, 0)
+                u_mol_vol = JKJInterpolate_r1(u_mol, ur_y, ur_vol, SortType)
+                u_fsl_vol_excav = u_mol_vol + live_vol_guess
+                u_fsl_vol = u_fsl_vol_excav - u_excav
+                u_fsl = JKJInterpolate_r1(l_fsl_vol, ur_vol, ur_y, SortType)
+            End If
+                        
+    End Select
+                
+    ' establish new turbine rating point
+    If turbine_rating_point = "Average head" Then
+    head_gross_new = ((u_fsl - l_mol) + (u_mol - l_fsl)) / 2
+    'average head
+    Else
+    head_gross_new = (u_mol - l_fsl)
+    'min head
+    End If
+    
+    
+    Hl_gen_rated_new = head_gross_new * head_loss_gen_ini
+    Htu_rated_new = head_gross_new - Hl_gen_rated_new
+    
+    flow_rate_new = power_goal * 1000 / (Htu_rated_new * g * eff_t)
+    live_vol_new = flow_rate_new * 3600 * 8
+    delta_vol = Abs(live_vol_guess - live_vol_new)
+    
+    Htu_rated_guess = Htu_rated_new
+'    head_gross_guess = head_gross_new
+    Z = Z + 1
+'    MsgBox ("iteration " & Z & "Delta vol : " & delta_vol)
+'
+'
+Loop
+
+    u_live_vol = u_fsl_vol - u_mol_vol
+    u_live_vol_excav = u_live_vol + u_excav
+    l_live_vol = l_fsl_vol - l_mol_vol
+    l_live_vol_excav = l_live_vol + l_excav
+
+    WL_updated(0, 0) = u_fsl
+    WL_updated(1, 0) = u_mol
+    WL_updated(2, 0) = u_excav
+    WL_updated(3, 0) = u_fsl_vol
+    WL_updated(4, 0) = u_mol_vol
+    WL_updated(5, 0) = u_live_vol
+    WL_updated(6, 0) = u_live_vol_excav
+            
+    WL_updated(0, 1) = l_fsl
+    WL_updated(1, 1) = l_mol
+    WL_updated(2, 1) = l_excav
+    WL_updated(3, 1) = l_fsl_vol
+    WL_updated(4, 1) = l_mol_vol
+    WL_updated(5, 1) = l_live_vol
+    WL_updated(6, 1) = l_live_vol_excav
+    
+    volumes_power_calc = WL_updated
+
+End Function
+
+Function volumes_head_range_calc(WL As Variant, inputs As Variant, ur_y As Variant, ur_vol As Variant, lr_y As Variant, lr_vol As Variant)
+
+Dim WL_updated As Variant
+ReDim WL_updated(6, 1)
+SortType = -1
+Dim delta_head_range As Double
+Z2 = 0
+
+head_loss_gen_ini = 0.05
+head_loss_pump_ini = head_loss_gen_ini * rte
+
+
+u_fsl = WL(0, 0)
+u_mol = WL(1, 0)
+l_fsl = WL(0, 1)
+l_mol = WL(1, 1)
+
+u_fsl_fix = inputs(5, 0)
+u_mol_fix = inputs(6, 0)
+l_fsl_fix = inputs(7, 0)
+l_mol_fix = inputs(8, 0)
+
+live_volume_ini = 500000
+live_volume_step = 200000
+
+Htu_max_i = (u_fsl - l_mol) * (1 - head_loss_gen_ini)
+range_limit = (0.0000005 * Htu_max_i ^ 2 - 0.001 * Htu_max_i + 1.6284) * 0.9
+
+' logic********************************************
+
+'edge cases_with one res fixed (so other is easy to calculate)__________
+    If u_fsl_fix = 1 And u_mol_fix = 1 Then
+        'ur is fixed
+        u_fsl_vol = JKJInterpolate_r1(u_fsl, ur_y, ur_vol, SortType)
+        u_mol_vol = JKJInterpolate_r1(u_mol, ur_y, ur_vol, SortType)
+            
+        If l_fsl_fix = 1 And l_mol_fix = 1 Then
+        'lr is fixed
+        l_fsl_vol = JKJInterpolate_r1(l_fsl, lr_y, lr_vol, SortType)
+        l_mol_vol = JKJInterpolate_r1(l_mol, lr_y, lr_vol, SortType)
+        
+        ElseIf l_fsl_fix = 1 And l_mol_fix = 0 Then
+        'need to calculate l_mol
+        l_mol = u_fsl - range_limit * (u_mol - l_fsl)
+        l_fsl_vol = JKJInterpolate_r1(l_fsl, lr_y, lr_vol, SortType)
+        l_mol_vol = JKJInterpolate_r1(l_mol, lr_y, lr_vol, SortType)
+        
+        
+        ElseIf l_fsl_fix = 0 And l_mol_fix = 0 Then
+        'need to calculate l_fsl
+        l_fsl = u_mol + (u_fsl - l_mol) / range_limit
+        l_fsl_vol = JKJInterpolate_r1(l_fsl, lr_y, lr_vol, SortType)
+        l_mol_vol = JKJInterpolate_r1(l_mol, lr_y, lr_vol, SortType)
+        
+        Else
+
+        End If
+            
+    ElseIf l_fsl_fix = 1 And l_mol_fix = 1 Then
+        'lr is fixed
+        l_fsl_vol = JKJInterpolate_r1(l_fsl, lr_y, lr_vol, SortType)
+        l_mol_vol = JKJInterpolate_r1(l_mol, lr_y, lr_vol, SortType)
+    
+        If u_fsl_fix = 1 And u_mol_fix = 0 Then
+        'need to calculate u_mol
+        u_mol = range_limit * (u_fsl - l_mol) + l_fsl
+        u_fsl_vol = JKJInterpolate_r1(u_fsl, ur_y, ur_vol, SortType)
+        u_mol_vol = JKJInterpolate_r1(u_mol, ur_y, ur_vol, SortType)
+    
+        ElseIf u_fsl_fix = 0 And i_mol_fix = 1 Then
+        'need to calculate u_fsl
+        u_fsl = range_limit * (u_mol - l_fsl) + l_mol
+        u_fsl_vol = JKJInterpolate_r1(u_fsl, ur_y, ur_vol, SortType)
+        u_mol_vol = JKJInterpolate_r1(u_mol, ur_y, ur_vol, SortType)
+
+        End If
+
+    Else
+    '______'main cases requiring iteration______ could be done much easier in python.
+        
+    live_volume_i = live_volume_ini
+    
+        Do Until head_range_i > range_limit
+            
+            If u_fsl_fix = 1 Then
+                    
+                If l_fsl_fix = 1 Then
+                'upper fsl is fixed, lower fsl is fixed.
+                    u_fsl = WL(0, 0)
+                    l_fsl = WL(0, 1)
+                    u_fsl_vol = JKJInterpolate_r1(u_fsl, ur_y, ur_vol, SortType)
+                    l_fsl_vol = JKJInterpolate_r1(l_fsl, lr_y, lr_vol, SortType)
+                    u_mol_vol = u_fsl_vol - live_volume_i
+                    l_mol_vol = l_fsl_vol - live_volume_i
+                    u_mol = JKJInterpolate_r1(u_mol_vol, ur_vol, ur_y, SortType)
+                    l_mol = JKJInterpolate_r1(l_mol_vol, lr_vol, lr_y, SortType)
+                ElseIf l_mol_fix = 1 Then
+                'upper fsl is fixed, lower mol is fixed.
+                    u_fsl = WL(0, 0)
+                    l_mol = WL(1, 1)
+                    u_fsl_vol = JKJInterpolate_r1(u_fsl, ur_y, ur_vol, SortType)
+                    l_mol_vol = JKJInterpolate_r1(l_mol, lr_y, lr_vol, SortType)
+                    u_mol_vol = u_fsl_vol - live_volume_i
+                    l_fsl_vol = l_mol_vol + live_volume_i
+                    u_mol = JKJInterpolate_r1(u_mol_vol, ur_vol, ur_y, SortType)
+                    l_fsl = JKJInterpolate_r1(l_fsl_vol, lr_vol, lr_y, SortType)
+                End If
+                    
+            ElseIf u_mol_fix = 1 Then
+                    
+                If l_fsl_fix = 1 Then
+                'upper mol is fixed, lower fsl is fixed.
+                    u_mol = WL(1, 0)
+                    l_fsl = WL(0, 1)
+                    u_mol_vol = JKJInterpolate_r1(u_mol, ur_y, ur_vol, SortType)
+                    l_fsl_vol = JKJInterpolate_r1(l_fsl, lr_y, lr_vol, SortType)
+                    u_fsl_vol = u_mol_vol + live_volume_i
+                    l_mol_vol = l_fsl_vol - live_volume_i
+                    u_fsl = JKJInterpolate_r1(u_fsl_vol, ur_vol, ur_y, SortType)
+                    l_mol = JKJInterpolate_r1(l_mol_vol, lr_vol, lr_y, SortType)
+        
+                ElseIf l_mol_fix = 1 Then
+                'upper mol is fixed, lower mol is fixed.
+                    u_mol = WL(1, 0)
+                    l_mol = WL(1, 1)
+                    u_mol_vol = JKJInterpolate_r1(u_mol, ur_y, ur_vol, SortType)
+                    l_mol_vol = JKJInterpolate_r1(l_mol, lr_y, lr_vol, SortType)
+                    u_fsl_vol = u_mol_vol + live_volume_i
+                    l_fsl_vol = l_mol_vol + live_volume_i
+                    u_fsl = JKJInterpolate_r1(u_fsl_vol, ur_vol, ur_y, SortType)
+                    l_fsl = JKJInterpolate_r1(l_fsl_vol, lr_vol, lr_y, SortType)
+                End If
+            End If
+            
+        head_range_i = (u_fsl - l_mol) / (u_mol - l_fsl)
+        
+        Htu_max_i = (u_fsl - l_mol) * (1 - head_loss_gen_ini)
+        
+        range_limit = (0.0000005 * Htu_max_i ^ 2 - 0.001 * Htu_max_i + 1.6284) * 0.9
+        MsgBox ("iteration " & Z2 & "range_limit: " & Round(range_limit, 3) & "hr = " & head_range_i)
+        
+        delta_head_range = head_range_i / range_limit
+        live_volume_i = live_volume_i + live_volume_step
+        
+        Z2 = Z2 + 1
+    '    MsgBox ("iteration " & Z2 & "head range: " & Round(head_range_i, 3) & "Delta: " & Round(delta_head_range, 3))
+        
+        Loop
+    
+    End If
+           
+u_excav = WL(2, 0)
+u_live_vol = u_fsl_vol - u_mol_vol
+u_live_vol_excav = u_live_vol + u_excav
+
+l_excav = WL(2, 1)
+l_live_vol = l_fsl_vol - l_mol_vol
+l_live_vol_excav = l_live_vol + l_excav
+        
+WL_updated(0, 0) = u_fsl
+WL_updated(1, 0) = u_mol
+WL_updated(2, 0) = u_excav
+WL_updated(3, 0) = u_fsl_vol
+WL_updated(4, 0) = u_mol_vol
+WL_updated(5, 0) = u_live_vol
+WL_updated(6, 0) = u_live_vol_excav
+        
+WL_updated(0, 1) = l_fsl
+WL_updated(1, 1) = l_mol
+WL_updated(2, 1) = l_excav
+WL_updated(3, 1) = l_fsl_vol
+WL_updated(4, 1) = l_mol_vol
+WL_updated(5, 1) = l_live_vol
+WL_updated(6, 1) = l_live_vol_excav
+
+volumes_head_range_calc = WL_updated
+
+End Function
+
+
+
+
+
+'Function volumes_r1(WL As Variant, inputs As Variant, ur_y As Variant, ur_vol As Variant, lr_y As Variant, lr_vol As Variant)
+'
+'u_fsl_fix = inputs(5, 0)
+'u_mol_fix = inputs(6, 0)
+'l_fsl_fix = inputs(7, 0)
+'l_mol_fix = inputs(8, 0)
+'u_excav = WL(2, 0)
+'l_excav = WL(2, 1)
+'
+'use_excav = inputs(1, 0)
+'use_head_range = inputs(2, 0)
+'use_power_solve = inputs(3, 0)
+'
+'ur_count = u_fsl_fix + u_mol_fix
+'lr_count = l_fsl_fix + l_mol_fix
+'
+'case_id_solve = use_power_solve & "_" & use_head_range
+'case_id_res = ur_count & "_" & lr_count
+'
+'SortType = -1
+'
+'    Select Case case_id_solve
+'        Case "0_0":
+'            Select Case case_id_res
+'            Case "1_1"
+'            ' need to add an error check here
+'            Case "2_2", "2_1", "1_2"
+'            ' run volumes_simple
+'            WL_updated = volumes_simple_calc(case_id_res, WL, inputs, ur_y, ur_vol, lr_y, lr_vol)
+'            End Select
+'    '********** solving cases *************
+'        'cases requiing iterations to solve for power
+'
+'        Case "1_0": 'solving for head range only.
+'            WL_updated = volumes_power_calc(case_id_res, WL, inputs, ur_y, ur_vol, lr_y, lr_vol)
+'
+'        Case "0_1": 'solving for head range only.
+'            WL_updated = volumes_head_range_calc(case_id_res, WL, inputs, ur_y, ur_vol, lr_y, lr_vol)
+'
+'    End Select
+'
+'volumes_r1 = WL_updated
+'
+'End Function
+
+
+
+
+
+Option Explicit
+Function non_rated_values(Power_calc_MW, k_gen, Hg_max, Hg_min, Hg_average, turbine_rating_point) ' now to calculate the other values, based on the rated condition.
+
+Dim rte, head_loss_gen_ini, head_loss_trial, hours_gen, g, eff_t, eff_p As Double
+Dim Q_gen_max_i, Q_gen_max, Q_gen_min_i, Q_gen_min, Q_gen_avg_i, Q_gen_avg, Q_pump_max_i, Q_pump_max, Q_pump_min_i, Q_pump_min, Q_pump_avg_i, Q_pump_avg, Hl_pump_rated, Htu_rated, Hpu_rated, delta_Q_max, delta_Q_tolerance, dq, dq2 As Double
+Dim case_id_solve, case_id_res As String
+Dim Hl_gen_max, Hl_gen_min, Hl_gen_avg, Hl_pump_min, Hl_pump_avg, Hl_pump_max, Htu_max, Htu_min, Htu_avg, Hpu_max, Hpu_min, Hpu_avg As Double
+Dim SortType, i, Hg_ratio_flag, Hpu_Htu_flag As Integer
+
+
+Dim Hg_ratio, Hpu_Htu_ratio, Hpu_Htu_limit, Hg_ratio_limit As Double
+
+
+'user inputs***********
+'default values
+rte = 0.75 'round trip efficiency
+
+head_loss_gen_ini = 0.05 'head loss (initial assumption in generation mode)
+
+hours_gen = 8 ' initial gen cycle time
+g = 9.81 'gravity
+eff_t = 0.9 'turbine mode efficency
+eff_p = 0.91 ' pump mode efficency
+SortType = -1
+'************************
+
+
+'calc preliminary flow rates for turbine mode (all based on gross head), as we dont know the head loss values yet, as they are based on flows (we need to iterate)
+'Q_gen_max refers to flow at the Hg_max condition (flow in min when Hg is max).
+
+Q_gen_max_i = Power_calc_MW * 1000 / (Hg_max * (1 - head_loss_gen_ini) * g * eff_t)
+Q_gen_min_i = Power_calc_MW * 1000 / (Hg_min * (1 - head_loss_gen_ini) * g * eff_t)  '**************
+Q_gen_avg_i = Power_calc_MW * 1000 / (Hg_average * (1 - head_loss_gen_ini) * g * eff_t)
+
+    ' when flow is rated to average, the min flow will exceed the rated, Hence the flow needs to be limited at H_min if using averae head rating.
+        If turbine_rating_point = "Average head" Then
+            Q_gen_min_i = Q_gen_avg_i
+        ElseIf turbine_rating_point = "Minimum head" Then
+        End If
+
+'calc preliminary flow rates for pumping mode
+Q_pump_max_i = Power_calc_MW * 1000 / (Hg_max * (1 + head_loss_gen_ini * rte) * g / eff_p)
+Q_pump_min_i = Power_calc_MW * 1000 / (Hg_min * (1 + head_loss_gen_ini * rte) * g / eff_p)
+Q_pump_avg_i = Power_calc_MW * 1000 / (Hg_average * (1 + head_loss_gen_ini * rte) * g / eff_p)
+
+'calc preliminary head loss for gen mode
+'Hl_gen_max refers to head loss at the Hg_max condition (when flow is min)
+Hl_gen_max = k_gen * Q_gen_max_i ^ 2
+Hl_gen_min = k_gen * Q_gen_min_i ^ 2
+Hl_gen_avg = k_gen * Q_gen_avg_i ^ 2
+
+'calc preliminary head loss for pump mode
+Hl_pump_min = k_gen * Q_pump_min_i ^ 2
+Hl_pump_avg = k_gen * Q_pump_avg_i ^ 2
+Hl_pump_max = k_gen * Q_pump_max_i ^ 2
+
+Htu_max = Hg_max - Hl_gen_max
+Htu_min = Hg_min - Hl_gen_min
+Htu_avg = Hg_average - Hl_gen_avg
+
+Hpu_max = Hg_max + Hl_gen_max
+Hpu_min = Hg_min + Hl_gen_min
+Hpu_avg = Hg_average + Hl_gen_avg
+
+delta_Q_max = 10
+ReDim delta_Q(5, 0)
+delta_Q_tolerance = 0.1
+
+Do Until delta_Q_max < delta_Q_tolerance
+    
+    'calc preliminary flow rates for turbine mode.
+    'Q_gen_max refers to flow at the Hg_max condition (flow in min when Hg is max).
+    Q_gen_max = Power_calc_MW * 1000 / (Htu_max * g * eff_t)
+    Q_gen_min = Power_calc_MW * 1000 / (Htu_min * g * eff_t)
+    Q_gen_avg = Power_calc_MW * 1000 / (Htu_avg * g * eff_t)
+    ' when flow is rated to average, the min flow will exceed the rated, Hence the flow needs to be limited at H_min if using averae head rating.
+        If turbine_rating_point = "Average head" Then
+            Q_gen_min = Q_gen_avg
+        ElseIf turbine_rating_point = "Minimum head" Then
+            Q_gen_min = Q_gen_min
+        End If
+
+    'calc preliminary flow rates for pumping mode
+    Q_pump_max = Power_calc_MW * 1000 / (Hpu_max * g / eff_p)
+    Q_pump_min = Power_calc_MW * 1000 / (Hpu_min * g / eff_p)
+    Q_pump_avg = Power_calc_MW * 1000 / (Hpu_avg * g / eff_p)
+    
+    'calc preliminary head loss for gen mode
+    'Hl_gen_max refers to head loss at the Hg_max condition (when flow is min)
+    Hl_gen_max = k_gen * Q_gen_max ^ 2
+    Hl_gen_min = k_gen * Q_gen_min ^ 2
+    Hl_gen_avg = k_gen * Q_gen_avg ^ 2
+    
+    'calc preliminary head loss for pump mode
+    Hl_pump_max = k_gen * Q_pump_max ^ 2
+    Hl_pump_min = k_gen * Q_pump_min ^ 2
+    Hl_pump_avg = k_gen * Q_pump_avg ^ 2
+    
+    delta_Q(0, 0) = Q_gen_max - Q_gen_max_i
+    delta_Q(1, 0) = Q_gen_min - Q_gen_min_i
+    delta_Q(2, 0) = Q_gen_avg - Q_gen_avg_i
+    delta_Q(3, 0) = Q_pump_max - Q_pump_max_i
+    delta_Q(4, 0) = Q_pump_min - Q_pump_min_i
+    delta_Q(5, 0) = Q_pump_avg - Q_pump_avg_i
+    
+    dq2 = 0
+    
+        For i = 1 To 6
+            dq = delta_Q(i - 1, 0)
+            If Abs(dq) > dq2 Then
+                dq2 = Abs(dq)
+            Else
+            End If
+        Next i
+
+    delta_Q_max = dq2
+    
+    Q_gen_max_i = Q_gen_max
+    Q_gen_min_i = Q_gen_min
+    Q_gen_avg_i = Q_gen_avg
+    Q_pump_max_i = Q_pump_max
+    Q_pump_min_i = Q_pump_min
+    Q_pump_avg_i = Q_pump_avg
+
+Loop
+
+Htu_max = Hg_max - Hl_gen_max
+Htu_min = Hg_min - Hl_gen_min
+Htu_avg = Hg_average - Hl_gen_avg
+
+Hpu_max = Hg_max + Hl_pump_max
+Hpu_min = Hg_min + Hl_pump_min
+Hpu_avg = Hg_average + Hl_pump_avg
+
+
+ReDim Head_table(8, 3)
+
+
+Head_table(2, 1) = Hg_max
+Head_table(2, 2) = Hg_min
+Head_table(2, 3) = Hg_average
+
+Head_table(3, 1) = Q_gen_max
+Head_table(3, 2) = Q_gen_min
+Head_table(3, 3) = Q_gen_avg
+
+Head_table(4, 1) = Q_pump_max
+Head_table(4, 2) = Q_pump_min
+Head_table(4, 3) = Q_pump_avg
+
+Head_table(5, 1) = Hl_gen_max
+Head_table(5, 2) = Hl_gen_min
+Head_table(5, 3) = Hl_gen_avg
+
+Head_table(6, 1) = Hl_pump_max
+Head_table(6, 2) = Hl_pump_min
+Head_table(6, 3) = Hl_pump_avg
+
+Head_table(7, 1) = Htu_max
+Head_table(7, 2) = Htu_min
+Head_table(7, 3) = Htu_avg
+
+Head_table(8, 1) = Hpu_max
+Head_table(8, 2) = Hpu_min
+Head_table(8, 3) = Hpu_avg
+
+non_rated_values = Head_table
+
+
+End Function
+
+
